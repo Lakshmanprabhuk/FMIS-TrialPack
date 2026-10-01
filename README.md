@@ -67,3 +67,4 @@ period, edit `TRIAL_COOLDOWN_DAYS` (defaults to 7).
   `profiles` and branching in `lib/trial.js`.
 - Add Anthropic back as a second provider by adding `ANTHROPIC_API_KEY` and
   a second branch in `app/api/analyze/route.js`.
+ 
