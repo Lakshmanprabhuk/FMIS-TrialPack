@@ -110,8 +110,8 @@ export default function AuthPage() {
             <div className="login-stat-lbl">Free trial run</div>
           </div>
           <div className="login-stat">
-            <div className="login-stat-val">Gemini</div>
-            <div className="login-stat-lbl">AI-powered analysis</div>
+            <div className="login-stat-val">Smart</div>
+            <div className="login-stat-lbl">Automated analysis</div>
           </div>
         </div>
         <div className="login-circles"></div>

@@ -35,12 +35,18 @@ export async function POST(request) {
     );
   }
 
-  // Call Gemini with the key held only on the server.
+  // Call the model with the key held only on the server. The real error is
+  // logged for debugging but never shown to the user — we don't want a
+  // failure to leak which provider is doing the analysis under the hood.
   let text;
   try {
     text = await callGemini(prompt);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 502 });
+    console.error('Analysis provider error:', e);
+    return NextResponse.json(
+      { error: 'Something went wrong while analyzing your file. Please try again.' },
+      { status: 502 }
+    );
   }
 
   // Consume the trial only after a successful generation, using the

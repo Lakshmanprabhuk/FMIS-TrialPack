@@ -38,6 +38,22 @@ const KPI_ICONS = ['📊', '💰', '📦', '📈', '🏆', '📉', '⚡', '🎯'
 const CHART_THEMES = {};
 let activeCharts = [];
 
+// Playful, non-AI-sounding verbs shown while we wait on the backend —
+// keeps processing feeling like "natural" crunching rather than "talking to a model".
+const PONDER_WORDS = [
+  'Pondering', 'Squashing', 'Analyzing', 'Sleuthing', 'Crunching', 'Untangling',
+  'Digesting', 'Deciphering', 'Unpacking', 'Distilling', 'Mulling over', 'Sifting through',
+  'Connecting the dots', 'Spotting patterns', 'Cross-checking', 'Number-crunching',
+  'Fact-finding', 'Puzzling through', 'Making sense of it', 'Joining the dots',
+  'Reading between the lines', 'Weighing the numbers', 'Chewing on it', 'Tallying up',
+  'Poking around', 'Piecing it together', 'Double-checking', 'Taking stock',
+];
+function randomPonderWord(exclude) {
+  let w = PONDER_WORDS[Math.floor(Math.random() * PONDER_WORDS.length)];
+  if (w === exclude && PONDER_WORDS.length > 1) return randomPonderWord(exclude);
+  return w;
+}
+
 function $id(id) {
   return document.getElementById(id);
 }
@@ -287,8 +303,10 @@ export default function Dashboard() {
   const [fileName, setFileName] = useState('');
   const [procSub, setProcSub] = useState('Preparing…');
   const [stepIdx, setStepIdx] = useState(-1);
+  const [pendingDash, setPendingDash] = useState(null); // { d, filename, total } queued until #dash is actually visible
   const dashRef = useRef(null);
   const ACTIVE_THEME_REF = useRef('vivid');
+  const ponderIntervalRef = useRef(null);
 
   async function getToken() {
     const { data } = await supabase.auth.getSession();
@@ -328,6 +346,23 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Runs after React has actually committed the 'dash' stage (so #dash is
+  // display:block and has real layout) before we touch its innerHTML or
+  // draw any charts into it.
+  useEffect(() => {
+    if (stage !== 'dash' || !pendingDash) return;
+    const { d, filename, total } = pendingDash;
+    try {
+      renderDashboard(d, filename, total);
+    } catch (e) {
+      showError('Render error: ' + e.message);
+      return;
+    }
+    setPendingDash(null);
+    refreshTrial();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, pendingDash]);
+
   async function handleSignOut() {
     destroyCharts();
     await supabase.auth.signOut();
@@ -365,7 +400,8 @@ export default function Dashboard() {
     const profileData_ = profileData(rows, fields);
 
     setStepIdx(2);
-    setProcSub('Sending to Gemini…');
+    let lastWord = null;
+    setProcSub(randomPonderWord() + '…');
     const prompt = buildPrompt(profileData_, fields, totalRows, file.name);
 
     const token = await getToken();
@@ -375,6 +411,13 @@ export default function Dashboard() {
     }
 
     setStepIdx(3);
+    // Rotate through playful status words for the whole duration of the
+    // backend call so it reads as ordinary processing, not "talking to AI".
+    ponderIntervalRef.current = setInterval(() => {
+      lastWord = randomPonderWord(lastWord);
+      setProcSub(lastWord + '…');
+    }, 1100);
+
     let resp;
     try {
       const r = await fetch('/api/analyze', {
@@ -397,20 +440,24 @@ export default function Dashboard() {
       if (b >= 0 && lb > b) c = c.slice(b, lb + 1);
       resp = JSON.parse(c);
     } catch (e) {
-      return showError(e instanceof SyntaxError ? 'AI returned invalid JSON. Try again.\n' + e.message : e.message);
+      return showError(e instanceof SyntaxError ? 'That took a wrong turn — try again.\n' + e.message : e.message);
+    } finally {
+      clearInterval(ponderIntervalRef.current);
     }
 
     setStepIdx(4);
-    try {
-      renderDashboard(resp, file.name, totalRows);
-      setStage('dash');
-      await refreshTrial();
-    } catch (e) {
-      showError('Render error: ' + e.message);
-    }
+    setProcSub('Putting it all together…');
+    // Queue the dashboard data and flip to the 'dash' stage; the actual
+    // innerHTML + chart draw happens in a useEffect once #dash has really
+    // been painted visible — drawing charts into a still-hidden (display:none)
+    // container gives them 0 width/height and they stay blank until something
+    // else (like switching chart type) forces a redraw.
+    setPendingDash({ d: resp, filename: file.name, total: totalRows });
+    setStage('dash');
   }
 
   function showError(msg) {
+    clearInterval(ponderIntervalRef.current);
     setErrMsg(msg);
     setStage('error');
   }
@@ -420,7 +467,6 @@ export default function Dashboard() {
     const ts = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     let h = `<div class="dash-hdr">
       <div>
-        <div class="dash-meta-badge">🤖 Gemini</div>
         <div class="dash-title">${x(d.title || 'Dashboard')}</div>
         <div class="dash-desc">${x(d.description || '')}</div>
       </div>
@@ -560,7 +606,7 @@ export default function Dashboard() {
 
   if (!ready) return null;
 
-  const stepLabels = ['Parsing & profiling CSV', 'Computing aggregations', 'Sending to AI', 'AI generating insights', 'Rendering dashboard'];
+  const stepLabels = ['Parsing your file', 'Computing aggregations', 'Spotting patterns', 'Crunching the numbers', 'Rendering dashboard'];
 
   return (
     <div id="app">
