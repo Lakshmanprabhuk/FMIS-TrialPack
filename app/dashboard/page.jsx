@@ -3,10 +3,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Chart from 'chart.js/auto';
-import CrosshairPlugin from 'chartjs-plugin-crosshair';
 import Papa from 'papaparse';
 import { supabase } from '../../lib/supabaseClient';
 
+// Custom lightweight crosshair plugin (replaces chartjs-plugin-crosshair
+// which is incompatible with Chart.js 4 and breaks tooltips).
+const CrosshairPlugin = {
+  id: 'insightlyCrosshair',
+  afterDraw(chart) {
+    if (!chart._active?.length) return;
+    const { ctx, chartArea: { top, bottom } } = chart;
+    const x = chart._active[0].element.x;
+    ctx.save();
+    ctx.beginPath();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#4A4A4A';
+    ctx.lineWidth = 1;
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+    ctx.restore();
+  },
+};
 Chart.register(CrosshairPlugin);
 
 // ── Chart defaults (same as original prototype) ────────────────────────────
@@ -265,8 +283,6 @@ function drawChart(idx, c, typeOverride, ACTIVE_THEME) {
     hoverBackgroundColor: isDonut ? P.slice(0, (ds.data || []).length).map((cc) => cc + 'EE') : isLine ? P[di % P.length] + '40' : P[di % P.length],
   }));
 
-  const crosshairCfg = isLine || (!isDonut && !isHoriz) ? { line: { color: '#4A4A4A', width: 1, dashPattern: [4, 4] }, sync: { enabled: false }, zoom: { enabled: false }, callbacks: { beforeZoom: () => true, afterZoom: () => {} } } : false;
-
   const ch = new Chart(canvas, {
     type: cType,
     data: { labels: c.labels || [], datasets },
@@ -277,8 +293,16 @@ function drawChart(idx, c, typeOverride, ACTIVE_THEME) {
       interaction: { mode: isDonut ? 'nearest' : 'index', intersect: false },
       plugins: {
         legend: { display: isDonut || (c.datasets || []).length > 1, position: isDonut ? 'right' : 'top', labels: { boxWidth: 11, padding: 14, font: { size: 11 }, usePointStyle: isLine, pointStyleWidth: isLine ? 8 : 11 } },
-        tooltip: { callbacks: { label: (ctx) => { const v = ctx.raw; if (typeof v !== 'number') return ` ${v}`; return ` ${ctx.dataset.label || ''}: ${fmtNum(v)}`; } } },
-        ...(crosshairCfg ? { crosshair: crosshairCfg } : {}),
+        tooltip: {
+          enabled: true,
+          mode: isDonut ? 'nearest' : 'index',
+          intersect: false,
+          callbacks: {
+            label: (ctx) => { const v = ctx.raw; if (typeof v !== 'number') return ` ${v}`; return ` ${ctx.dataset.label || ''}: ${fmtNum(v)}`; },
+          },
+        },
+        // Only show crosshair line on line/bar charts, not donut
+        insightlyCrosshair: { display: !isDonut },
       },
       scales: isDonut ? {} : {
         x: { grid: { color: '#F0F0EE', drawBorder: false }, ticks: { maxTicksLimit: 12, maxRotation: 35, font: { size: 11 } }, border: { display: false } },
@@ -542,8 +566,18 @@ export default function Dashboard() {
     window._chartData = d.charts || [];
 
     if (d.charts?.length) {
+      // Wait 2 frames so the browser has fully laid out every chart container
+      // (width/height > 0) before we draw into them. A single rAF is not enough
+      // because innerHTML triggers style recalc but the layout pass for containers
+      // further down the page may still be pending. Drawing into a 0×0 canvas
+      // produces an invisible chart that only "appears" after a forced resize
+      // (like switching chart type).
       requestAnimationFrame(() => {
-        d.charts.forEach((c, i) => drawChart(i, c, c.type, ACTIVE_THEME_REF.current));
+        requestAnimationFrame(() => {
+          d.charts.forEach((c, i) => {
+            drawChart(i, c, c.type, ACTIVE_THEME_REF.current);
+          });
+        });
       });
     }
   }
