@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin, getUserFromRequest } from '../../../lib/supabaseAdmin';
 import { evaluateTrial } from '../../../lib/trial';
+import { buildNarrativePrompt, validateNarrativeInput } from '../../../lib/narrativePrompt';
+
+export const maxDuration = 60;
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
@@ -10,13 +13,21 @@ export async function POST(request) {
     return NextResponse.json({ error: 'Not authenticated.' }, { status: 401 });
   }
 
-  const { prompt } = await request.json();
-  if (!prompt || typeof prompt !== 'string') {
-    return NextResponse.json({ error: 'Missing prompt.' }, { status: 400 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid request.' }, { status: 400 });
   }
 
-  // Re-check eligibility server-side right before spending the trial —
-  // never trust a client-side check alone.
+  // The client sends only computed facts. The prompt is built here, so the
+  // endpoint cannot be used as a general-purpose text generator.
+  const input = validateNarrativeInput(body);
+  if (!input) {
+    return NextResponse.json({ error: 'Missing or invalid report summary.' }, { status: 400 });
+  }
+
+  // Re-check eligibility server-side right before spending the trial.
   const { data: profile, error: profileErr } = await supabaseAdmin
     .from('profiles')
     .select('last_trial_at, trial_count')
@@ -29,28 +40,21 @@ export async function POST(request) {
 
   const { eligible, nextAvailableAt } = evaluateTrial(profile);
   if (!eligible) {
-    return NextResponse.json(
-      { error: 'Weekly trial already used.', nextAvailableAt },
-      { status: 429 }
-    );
+    return NextResponse.json({ error: 'Weekly trial already used.', nextAvailableAt }, { status: 429 });
   }
 
-  // Call the model with the key held only on the server. The real error is
-  // logged for debugging but never shown to the user — we don't want a
-  // failure to leak which provider is doing the analysis under the hood.
-  let text;
+  let narrative;
   try {
-    text = await callGemini(prompt);
+    narrative = await generateNarrative(buildNarrativePrompt(input.facts, input.meta));
   } catch (e) {
-    console.error('Analysis provider error:', e);
+    // Real error is logged, never exposed. The trial is NOT consumed on failure.
+    console.error('Narrative provider error:', e);
     return NextResponse.json(
-      { error: 'Something went wrong while analyzing your file. Please try again.' },
+      { error: 'Commentary could not be generated. Your report is still available.' },
       { status: 502 }
     );
   }
 
-  // Consume the trial only after a successful generation, using the
-  // service-role client so the write bypasses RLS and can't be spoofed.
   const { error: updateErr } = await supabaseAdmin
     .from('profiles')
     .update({
@@ -60,35 +64,78 @@ export async function POST(request) {
     .eq('id', user.id);
 
   if (updateErr) {
-    // The generation succeeded but we failed to record trial usage — log it,
-    // still return the result to the user rather than losing their work.
     console.error('Failed to update trial usage for user', user.id, updateErr);
   }
 
-  return NextResponse.json({ text });
+  return NextResponse.json({ narrative });
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+function extractJson(raw) {
+  let c = String(raw || '').trim();
+  const fence = c.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) c = fence[1].trim();
+  const a = c.indexOf('{');
+  const b = c.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  const slice = c.slice(a, b + 1);
+  for (const candidate of [slice, slice.replace(/,\s*([}\]])/g, '$1')]) {
+    try {
+      const o = JSON.parse(candidate);
+      if (o && typeof o === 'object' && !Array.isArray(o)) return o;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+async function generateNarrative(prompt) {
+  let lastErr = new Error('No attempt made.');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const text = await callGemini(
+        attempt === 0
+          ? prompt
+          : prompt + '\n\nYour previous reply could not be parsed. Reply again with ONLY the JSON object.'
+      );
+      const obj = extractJson(text);
+      if (obj) return obj;
+      lastErr = new Error('Unparseable model output.');
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 async function callGemini(prompt) {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('Server is not configured with a Gemini API key.');
+  if (!apiKey) throw new Error('Server is not configured with an API key.');
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const r = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: 4096, temperature: 0.1 },
+      generationConfig: {
+        maxOutputTokens: 8192,
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+      },
     }),
+    signal: AbortSignal.timeout(50000),
   });
 
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
-    throw new Error(`Gemini error ${r.status}: ${e?.error?.message || r.statusText}`);
+    throw new Error(`Provider error ${r.status}: ${e?.error?.message || r.statusText}`);
   }
 
   const body = await r.json();
-  const t = body.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!t) throw new Error('Empty response from Gemini.');
+  const parts = body.candidates?.[0]?.content?.parts || [];
+  const t = parts.filter((p) => !p.thought).map((p) => p.text || '').join('');
+  if (!t) throw new Error('Empty response.');
   return t;
 }

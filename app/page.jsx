@@ -92,7 +92,7 @@ export default function AuthPage() {
             Turn your data into <em>decisions</em>, instantly.
           </div>
           <div className="login-sub">
-            Upload any CSV and get a full AI-powered dashboard in seconds — no setup, no SQL, no
+            Upload any CSV and get a full management report in seconds — no setup, no SQL, no
             waiting.
           </div>
         </div>
