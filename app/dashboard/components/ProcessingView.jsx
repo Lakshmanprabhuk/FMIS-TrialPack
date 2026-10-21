@@ -1,6 +1,6 @@
 const ICON = { pending: '○', done: '✓', warn: '!' };
 
-export default function ProcessingView({ stages, fileName }) {
+export default function ProcessingView({ stages, fileName, title = 'Building your report' }) {
   return (
     <div className="mis-proc">
       {/* Skeleton of the final report layout */}
@@ -25,7 +25,7 @@ export default function ProcessingView({ stages, fileName }) {
       </div>
 
       <div className="mis-proc-card" role="status" aria-live="polite">
-        <div className="mis-proc-title">Building your report</div>
+        <div className="mis-proc-title">{title}</div>
         <div className="mis-proc-file">{fileName}</div>
         <ol className="mis-pipe">
           {stages.map((s) => (

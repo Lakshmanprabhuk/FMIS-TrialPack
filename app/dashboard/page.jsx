@@ -9,6 +9,14 @@ import { buildFacts, buildMeta } from '../../lib/mis/facts';
 import { fetchNarrative, sanitizeNarrative } from '../../lib/mis/narrative';
 import ProcessingView from './components/ProcessingView';
 import ReportShell from './components/ReportShell';
+import ThemePicker from './components/ThemePicker';
+import ReviewData from './components/ReviewData';
+import ConfirmUnderstanding from './components/ConfirmUnderstanding';
+import { computeDeep } from '../../lib/mis/deep';
+import { fetchVerify } from '../../lib/mis/verify';
+import { focusFacts } from '../../lib/mis/focus';
+import { computeAnalyst } from '../../lib/mis/analyst';
+import { initialSchema, planAnalysis, buildVerifyPayload, buildCtxSchema, buildUserContext } from '../../lib/mis/plan';
 import './mis.css';
 
 const STAGES = [
@@ -28,7 +36,15 @@ export default function Dashboard() {
   const [profile, setProfile] = useState(null);
   const [trial, setTrial] = useState(null);
   const [trialLoading, setTrialLoading] = useState(true);
-  const [stage, setStage] = useState('drop'); // drop | processing | error | report
+  const [stage, setStage] = useState('drop'); // drop | parsing | review | confirm | processing | error | report
+  const [pre, setPre] = useState(null); // { rows, fields, ds } as first detected, before any edit
+  const [schema, setSchema] = useState(null);
+  const [conf, setConf] = useState(null); // { ds, plan } built from the user's edits
+  const [verify, setVerify] = useState(null);
+  const [verifyState, setVerifyState] = useState('loading');
+  const [verifyError, setVerifyError] = useState('');
+  const [highlight, setHighlight] = useState('');
+  const [navOpen, setNavOpen] = useState(false);
   const [errMsg, setErrMsg] = useState('');
   const [fileName, setFileName] = useState('');
   const [stages, setStages] = useState(freshStages());
@@ -84,6 +100,11 @@ export default function Dashboard() {
   function resetToDrop() {
     runRef.current++; // invalidates any in-flight pipeline
     setReport(null);
+    setPre(null);
+    setSchema(null);
+    setConf(null);
+    setVerify(null);
+    setNavOpen(false);
     setStage('drop');
     setFileName('');
     setErrMsg('');
@@ -96,15 +117,14 @@ export default function Dashboard() {
 
   const upd = (id, patch) => setStages((s) => s.map((x) => (x.id === id ? { ...x, ...patch } : x)));
 
+  // Step 1: read the file and detect columns. Nothing is analysed and nothing is sent anywhere yet.
   async function handleFile(file) {
     const run = ++runRef.current;
     const stale = () => run !== runRef.current;
     setFileName(file.name);
     setStages(freshStages());
-    setStage('processing');
-
+    setStage('parsing');
     try {
-      // 1. Parse
       upd('parse', { status: 'running', detail: 'Reading file…' });
       await tick();
       const { rows, fields } = await parseFile(file, (p) => {
@@ -112,46 +132,117 @@ export default function Dashboard() {
       });
       if (stale()) return;
       upd('parse', { status: 'done', detail: `${plural(rows.length, 'row')} · ${plural(fields.length, 'column')}` });
-
-      // 2. Profile & validate
       upd('profile', { status: 'running', detail: 'Detecting column types…' });
       await tick();
       const ds = buildDataset(rows, fields);
       if (stale()) return;
-      const bits = [
-        plural(ds.n, 'row'),
-        plural(ds.fields.length, 'column'),
-        `${ds.dates.length} date column${ds.dates.length === 1 ? '' : 's'} detected`,
-        `${ds.numeric.length} numeric`,
-      ];
-      if (ds.stats.dupes) bits.push(plural(ds.stats.dupes, 'duplicate'));
-      upd('profile', { status: 'done', detail: bits.join(' · ') });
+      upd('profile', { status: 'done', detail: `${ds.dates.length} date, ${ds.numeric.length} numeric` });
+      setPre({ rows, fields, ds });
+      setSchema(initialSchema(ds));
+      setHighlight('');
+      setStage('review');
+    } catch (e) {
+      if (!stale()) showError(e?.message || 'Something went wrong while reading the file.');
+    }
+  }
 
-      // 3. Compute
+  // Step 2: apply the user's edits to build the confirmed dataset, then ask the AI whether it understands it.
+  async function confirmSchema() {
+    if (!pre || !schema) return;
+    const run = ++runRef.current;
+    const stale = () => run !== runRef.current;
+    let ds;
+    try {
+      ds = buildDataset(pre.rows, pre.fields, schema);
+    } catch (e) {
+      showError(e?.message || 'Could not apply your changes.');
+      return;
+    }
+    setConf({ ds, plan: planAnalysis(ds) });
+    setVerify(null);
+    setVerifyError('');
+    setVerifyState('loading');
+    setStage('confirm');
+    try {
+      const token = await getToken();
+      if (!token) {
+        router.replace('/');
+        return;
+      }
+      const v = await fetchVerify(buildVerifyPayload(ds, pre.rows, schema), token);
+      if (stale()) return;
+      setVerify(v);
+      setVerifyState('ok');
+    } catch (e) {
+      if (stale()) return;
+      if (e.status === 401) {
+        router.replace('/');
+        return;
+      }
+      setVerifyError(
+        e.status === 429
+          ? 'Your weekly free trial has already been used.'
+          : 'The AI check could not be completed. Your columns are shown as the app read them.'
+      );
+      setVerifyState('error');
+    }
+  }
+
+  function editColumn(orig) {
+    runRef.current++;
+    setHighlight(orig);
+    setStage('review');
+  }
+
+  // Step 3: the full analysis on the confirmed dataset. focusText is empty for the standard run.
+  async function runAnalysis(focusText) {
+    if (!conf || !pre) return;
+    const run = ++runRef.current;
+    const stale = () => run !== runRef.current;
+    const { ds } = conf;
+    setStages(freshStages());
+    setStage('processing');
+    try {
+      upd('parse', { status: 'done', detail: `${plural(ds.n, 'row')} · ${plural(ds.fields.length, 'column')} (your confirmed version)` });
+      upd('profile', { status: 'done', detail: `${ds.dates.length} date column${ds.dates.length === 1 ? '' : 's'} · ${ds.numeric.length} numeric` });
+
       upd('compute', { status: 'running', detail: 'Totals, trends, rankings, exceptions…' });
       await tick();
       const baseView = defaultView(ds);
-      const mask = buildMask(ds, { from: '', to: '', cats: {}, dropDupes: false });
+      const mask = buildMask(ds, { from: '', to: '', cats: {}, dropDupes: !!schema.dropDupes });
       const ins = computeInsights(ds, mask, baseView);
-      const facts = buildFacts(ds, ins, baseView);
-      const meta = buildMeta(ds, ins, baseView, file.name);
+      const deep = computeDeep(ds, mask, baseView, ins);
+      const fcs = focusText ? focusFacts(ds, mask, baseView, ins, focusText) : { matches: [], items: [] };
+      let an = { items: [] };
+      try {
+        an = computeAnalyst(ds, mask, baseView, ins, { schema: buildCtxSchema(ds), focus: focusText || '' }) || an;
+      } catch {
+        /* a failing optional module must never stop the report */
+      }
+      const core = [
+        ...buildFacts(ds, ins, baseView).filter((f) => !(deep.forecast.ok && f.id === 'trend_projection')),
+        ...deep.items.map(({ id, text }) => ({ id, text })),
+      ];
+      const room = Math.max(0, 215 - core.length - fcs.items.length);
+      const facts = [...core, ...fcs.items, ...(an.items || []).slice(0, room)];
+      const meta = buildMeta(ds, ins, baseView, fileName);
       if (stale()) return;
       upd('compute', {
         status: 'done',
         detail: `${plural(ins.groups.length, 'segment')} · ${plural(ins.series ? ins.series.labels.length : 0, 'period')} · ${plural(ins.outliers.count, 'outlier')} flagged`,
       });
 
-      // 4. Narrative (text only; every figure is already computed)
-      upd('narrative', { status: 'running', detail: 'Writing management commentary…' });
+      upd('narrative', { status: 'running', detail: focusText ? 'Writing commentary and answering your focus…' : 'Writing management commentary…' });
       const token = await getToken();
       if (!token) {
         router.replace('/');
         return;
       }
+      const context = buildUserContext(ds, schema, focusText);
       let narrative = null;
       let note = '';
       try {
-        const raw = await fetchNarrative(facts, meta, token);
+        const raw = await fetchNarrative(facts, meta, token, context);
         narrative = sanitizeNarrative(raw, facts);
         if (!narrative || (!narrative.summary && !narrative.takeaways.length)) {
           narrative = null;
@@ -172,11 +263,15 @@ export default function Dashboard() {
       if (stale()) return;
       upd('narrative', narrative ? { status: 'done', detail: 'Commentary ready' } : { status: 'warn', detail: 'Skipped. Report uses computed takeaways' });
 
-      // 5. Build
       upd('build', { status: 'running', detail: 'Assembling sections…' });
       await tick();
       if (stale()) return;
-      setReport({ ds, fileName: file.name, facts, meta, narrative, narrativeNote: note, generatedAt: new Date(), baseView });
+      setReport({
+        ds, fileName, facts, meta, narrative, narrativeNote: note, generatedAt: new Date(), baseView, context,
+        focus: focusText ? { text: focusText, items: fcs.items, matches: fcs.matches } : null,
+        initialDropDupes: !!schema.dropDupes,
+        initialTarget: schema.target || '',
+      });
       upd('build', { status: 'done', detail: 'Done' });
       setStage('report');
       refreshTrial();
@@ -194,7 +289,7 @@ export default function Dashboard() {
         router.replace('/');
         return;
       }
-      const raw = await fetchNarrative(report.facts, report.meta, token);
+      const raw = await fetchNarrative(report.facts, report.meta, token, report.context);
       const narrative = sanitizeNarrative(raw, report.facts);
       if (narrative && (narrative.summary || narrative.takeaways.length)) {
         setReport((r) => ({ ...r, narrative, narrativeNote: '' }));
@@ -223,6 +318,11 @@ export default function Dashboard() {
   return (
     <div id="app">
       <header className="hdr">
+        {stage === 'report' && (
+          <button className="hdr-burger" onClick={() => setNavOpen((o) => !o)} aria-label="Open report menu" aria-expanded={navOpen}>
+            <span /><span /><span />
+          </button>
+        )}
         <div className="hdr-logo">
           <div className="hdr-mark">I</div>
           <div className="hdr-name">
@@ -230,7 +330,9 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="hdr-divider"></div>
-        <div className="hdr-breadcrumb">{stage === 'report' ? 'MIS Report' : stage === 'processing' ? 'Building report…' : 'Upload Data'}</div>
+        <div className="hdr-breadcrumb">
+          {{ report: 'MIS Report', processing: 'Building report…', parsing: 'Reading file…', review: 'Review your data', confirm: 'Confirm understanding' }[stage] || 'Upload Data'}
+        </div>
         <div className="hdr-right">
           {!trialLoading && trial && <div id="hdr-trial">{trial.eligible ? 'Trial available' : 'Trial used this week'}</div>}
           {fileName && stage !== 'drop' && (
@@ -243,6 +345,7 @@ export default function Dashboard() {
               ← New file
             </button>
           )}
+          <ThemePicker />
           <button className="btn-outline" onClick={handleSignOut}>
             Sign out
           </button>
@@ -301,6 +404,31 @@ export default function Dashboard() {
           </div>
         ))}
 
+      {stage === 'parsing' && <ProcessingView stages={stages.slice(0, 2)} fileName={fileName} title="Reading your file" />}
+
+      {stage === 'review' && pre && schema && (
+        <ReviewData fileName={fileName} rows={pre.rows} ds={pre.ds} schema={schema} setSchema={setSchema} highlight={highlight} onContinue={confirmSchema} onCancel={resetToDrop} />
+      )}
+
+      {stage === 'confirm' && conf && (
+        <ConfirmUnderstanding
+          fileName={fileName}
+          ds={conf.ds}
+          plan={conf.plan}
+          verify={verify}
+          verifyState={verifyState}
+          verifyError={verifyError}
+          busy={false}
+          onEdit={editColumn}
+          onBack={() => {
+            runRef.current++;
+            setHighlight('');
+            setStage('review');
+          }}
+          onStart={runAnalysis}
+        />
+      )}
+
       {stage === 'processing' && <ProcessingView stages={stages} fileName={fileName} />}
 
       {stage === 'error' && (
@@ -317,7 +445,7 @@ export default function Dashboard() {
       )}
 
       {stage === 'report' && report && (
-        <ReportShell report={report} onReupload={resetToDrop} onRetryNarrative={retryNarrative} narrativeBusy={narrativeBusy} />
+        <ReportShell report={report} onReupload={resetToDrop} onRetryNarrative={retryNarrative} narrativeBusy={narrativeBusy} navOpen={navOpen} setNavOpen={setNavOpen} />
       )}
     </div>
   );

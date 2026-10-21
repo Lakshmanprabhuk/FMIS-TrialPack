@@ -2,10 +2,9 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin, getUserFromRequest } from '../../../lib/supabaseAdmin';
 import { evaluateTrial } from '../../../lib/trial';
 import { buildNarrativePrompt, validateNarrativeInput } from '../../../lib/narrativePrompt';
+import { generateJson } from '../../../lib/gemini';
 
 export const maxDuration = 60;
-
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
 export async function POST(request) {
   const user = await getUserFromRequest(request);
@@ -45,7 +44,7 @@ export async function POST(request) {
 
   let narrative;
   try {
-    narrative = await generateNarrative(buildNarrativePrompt(input.facts, input.meta));
+    narrative = await generateJson(buildNarrativePrompt(input.facts, input.meta, input.context));
   } catch (e) {
     // Real error is logged, never exposed. The trial is NOT consumed on failure.
     console.error('Narrative provider error:', e);
@@ -68,74 +67,4 @@ export async function POST(request) {
   }
 
   return NextResponse.json({ narrative });
-}
-
-// ── helpers ────────────────────────────────────────────────────────────────
-function extractJson(raw) {
-  let c = String(raw || '').trim();
-  const fence = c.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) c = fence[1].trim();
-  const a = c.indexOf('{');
-  const b = c.lastIndexOf('}');
-  if (a < 0 || b <= a) return null;
-  const slice = c.slice(a, b + 1);
-  for (const candidate of [slice, slice.replace(/,\s*([}\]])/g, '$1')]) {
-    try {
-      const o = JSON.parse(candidate);
-      if (o && typeof o === 'object' && !Array.isArray(o)) return o;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
-
-async function generateNarrative(prompt) {
-  let lastErr = new Error('No attempt made.');
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const text = await callGemini(
-        attempt === 0
-          ? prompt
-          : prompt + '\n\nYour previous reply could not be parsed. Reply again with ONLY the JSON object.'
-      );
-      const obj = extractJson(text);
-      if (obj) return obj;
-      lastErr = new Error('Unparseable model output.');
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr;
-}
-
-async function callGemini(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('Server is not configured with an API key.');
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        maxOutputTokens: 8192,
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-      },
-    }),
-    signal: AbortSignal.timeout(50000),
-  });
-
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({}));
-    throw new Error(`Provider error ${r.status}: ${e?.error?.message || r.statusText}`);
-  }
-
-  const body = await r.json();
-  const parts = body.candidates?.[0]?.content?.parts || [];
-  const t = parts.filter((p) => !p.thought).map((p) => p.text || '').join('');
-  if (!t) throw new Error('Empty response.');
-  return t;
 }

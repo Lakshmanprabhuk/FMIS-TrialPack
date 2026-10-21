@@ -29,7 +29,7 @@ export default function Trends({ ds, ins, view, theme, onDrill }) {
     }
     const pop = a.pop.map((v) => (v == null ? null : +(v * 100).toFixed(2)));
     const yoy = a.yoy.map((v) => (v == null ? null : +(v * 100).toFixed(2)));
-    return { keys, labelsFmt: keys.map(fmtPeriod), actual, ma, pj, pop, yoy, hasProj: !!proj, hasYoY: yoy.some((v) => v != null), popColors: pop.map((v) => (v != null && v < 0 ? '#7B1E30' : '#2E7D32')) };
+    return { keys, labelsFmt: keys.map(fmtPeriod), actual, ma, pj, pop, yoy, hasProj: !!proj, hasYoY: yoy.some((v) => v != null), popColors: pop.map((v) => (v != null && v < 0 ? '#B3261E' : '#2E7D32')) };
   }, [s, g]);
 
   if (!s || !model) return <Empty title="Trend analysis unavailable">No usable date column was found in this data (or no dated rows match the filters). Breakdown and ranking sections still work.</Empty>;
