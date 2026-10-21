@@ -4,8 +4,20 @@ import { useEffect, useMemo, useRef } from 'react';
 import Chart from 'chart.js/auto';
 import { COLOR_THEMES } from '../../../lib/mis/chartSetup';
 
+// Scriptable gradient. Colours are 6-digit hex, so a 2-digit alpha can be appended.
+const grad = (color, a0, a1, horizontal) => (c) => {
+  const { ctx, chartArea } = c.chart;
+  if (!chartArea) return color + a0;
+  const g = horizontal
+    ? ctx.createLinearGradient(chartArea.left, 0, chartArea.right, 0)
+    : ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+  g.addColorStop(0, color + a0);
+  g.addColorStop(1, color + a1);
+  return g;
+};
+
 // datasets: [{ label, data, kind?: 'bar'|'line', color?, colors?, dashed?, fill?, points?, yAxisID? }]
-export default function ChartCanvas({ type = 'bar', labels, datasets, theme = 'vivid', fmt, onPick, height = 240, label = 'Chart' }) {
+export default function ChartCanvas({ type = 'bar', labels, datasets, theme = 'burgundy', fmt, onPick, height = 240, label = 'Chart' }) {
   const ref = useRef(null);
   const fmtRef = useRef(fmt);
   const pickRef = useRef(onPick);
@@ -16,7 +28,7 @@ export default function ChartCanvas({ type = 'bar', labels, datasets, theme = 'v
 
   useEffect(() => {
     if (!ref.current) return undefined;
-    const P = (COLOR_THEMES[theme] || COLOR_THEMES.vivid).swatches;
+    const P = (COLOR_THEMES[theme] || COLOR_THEMES.burgundy).swatches;
     const donut = type === 'donut';
     const horiz = type === 'horizontal_bar';
     const src = donut ? datasets.slice(0, 1) : datasets;
@@ -28,31 +40,35 @@ export default function ChartCanvas({ type = 'bar', labels, datasets, theme = 'v
       if (horiz) kind = 'bar';
       const base = { label: d.label || '', data: d.data, yAxisID: d.yAxisID };
       if (donut) {
-        return { ...base, backgroundColor: d.data.map((_, j) => P[j % P.length]), borderColor: '#fff', borderWidth: 2 };
+        return { ...base, backgroundColor: d.data.map((_, j) => P[j % P.length]), borderColor: '#fff', borderWidth: 3, hoverOffset: 8, borderRadius: 6, spacing: 2 };
       }
       if (kind === 'line') {
         return {
           ...base,
           type: 'line',
           borderColor: color,
-          backgroundColor: color + '22',
-          borderWidth: 2,
-          tension: 0.3,
-          fill: !!d.fill,
+          backgroundColor: d.fillTo != null ? color + '26' : d.fill ? grad(color, '44', '00') : color + '22',
+          borderWidth: d.width || 2.5,
+          tension: 0.35,
+          fill: d.fillTo != null ? d.fillTo : !!d.fill,
           pointRadius: d.points === false ? 0 : 3,
-          pointHoverRadius: 5,
-          borderDash: d.dashed ? [6, 4] : undefined,
+          pointHoverRadius: 6,
+          pointBackgroundColor: '#fff',
+          pointBorderColor: color,
+          pointBorderWidth: 2,
+          borderDash: d.dashed ? [6, 5] : undefined,
           spanGaps: false,
         };
       }
-      return { ...base, type: 'bar', backgroundColor: d.colors || color + 'CC', hoverBackgroundColor: d.colors || color, borderRadius: 3, maxBarThickness: 36 };
+      const bg = d.colors || grad(color, horiz ? '88' : 'FF', horiz ? 'FF' : '99', horiz);
+      return { ...base, type: 'bar', backgroundColor: bg, hoverBackgroundColor: d.colors || color, borderRadius: 8, borderSkipped: false, maxBarThickness: 38 };
     });
 
     const cType = donut ? 'doughnut' : ds.some((d) => d.type === 'bar') ? 'bar' : 'line';
     const valueScale = {
-      grid: { color: '#F0F0EE' },
+      grid: { color: '#F1EDF3' },
       border: { display: false },
-      ticks: { font: { size: 11 }, callback: (v) => (fmtRef.current ? fmtRef.current(v) : v) },
+      ticks: { font: { size: 11 }, padding: 6, callback: (v) => (fmtRef.current ? fmtRef.current(v) : v) },
     };
     const catScale = {
       grid: { display: false },
@@ -71,9 +87,15 @@ export default function ChartCanvas({ type = 'bar', labels, datasets, theme = 'v
         indexAxis: horiz ? 'y' : 'x',
         responsive: true,
         maintainAspectRatio: false,
+        cutout: donut ? '66%' : undefined,
         interaction: { mode: donut ? 'nearest' : 'index', intersect: false },
+        animation: {
+          duration: 900,
+          easing: 'easeOutQuart',
+          delay: (c) => (c.type === 'data' && c.mode === 'default' ? Math.min(c.dataIndex * 18, 450) : 0),
+        },
         plugins: {
-          legend: { display: donut || ds.length > 1, position: donut ? 'right' : 'top', labels: { boxWidth: 10, padding: 12, font: { size: 11 } } },
+          legend: { display: donut || ds.length > 1, position: donut ? 'right' : 'top', labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 14, font: { size: 11 } } },
           tooltip: {
             callbacks: {
               label: (c) => {

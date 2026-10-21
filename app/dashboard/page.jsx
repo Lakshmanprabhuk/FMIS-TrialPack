@@ -9,6 +9,8 @@ import { buildFacts, buildMeta } from '../../lib/mis/facts';
 import { fetchNarrative, sanitizeNarrative } from '../../lib/mis/narrative';
 import ProcessingView from './components/ProcessingView';
 import ReportShell from './components/ReportShell';
+import ThemePicker from './components/ThemePicker';
+import { computeDeep } from '../../lib/mis/deep';
 import './mis.css';
 
 const STAGES = [
@@ -133,7 +135,11 @@ export default function Dashboard() {
       const baseView = defaultView(ds);
       const mask = buildMask(ds, { from: '', to: '', cats: {}, dropDupes: false });
       const ins = computeInsights(ds, mask, baseView);
-      const facts = buildFacts(ds, ins, baseView);
+      const deep = computeDeep(ds, mask, baseView, ins);
+      const facts = [
+        ...buildFacts(ds, ins, baseView).filter((f) => !(deep.forecast.ok && f.id === 'trend_projection')),
+        ...deep.items.map(({ id, text }) => ({ id, text })),
+      ];
       const meta = buildMeta(ds, ins, baseView, file.name);
       if (stale()) return;
       upd('compute', {
@@ -243,6 +249,7 @@ export default function Dashboard() {
               ← New file
             </button>
           )}
+          <ThemePicker />
           <button className="btn-outline" onClick={handleSignOut}>
             Sign out
           </button>
