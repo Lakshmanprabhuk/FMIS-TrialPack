@@ -26,7 +26,7 @@ export default function Pivot({ ds, mask, view, onDrill }) {
   const heat = (v) => {
     if (v == null) return {};
     const t = (v - p.lo) / range;
-    return { background: `rgba(123,30,48,${(0.05 + 0.55 * t).toFixed(3)})`, color: t > 0.62 ? '#fff' : undefined };
+    return { background: `color-mix(in srgb, var(--burg) ${Math.round(6 + 54 * t)}%, #fff)`, color: t > 0.62 ? '#fff' : undefined };
   };
 
   return (

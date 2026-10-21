@@ -93,7 +93,7 @@ export default function Ranking({ ds, ins, view, theme, onDrill, commentary }) {
           <ShareList items={p.items.slice(0, n)} money={money} color="#2E7D32" />
         </Card>
         <Card title={`Bottom ${n}`} note="Smallest positive totals">
-          <ShareList items={bottom} money={money} color="#7B1E30" />
+          <ShareList items={bottom} money={money} color="var(--burg)" />
         </Card>
       </div>
 

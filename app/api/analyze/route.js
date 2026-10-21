@@ -5,7 +5,27 @@ import { buildNarrativePrompt, validateNarrativeInput } from '../../../lib/narra
 
 export const maxDuration = 60;
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+// Models are tried in this order. When one is overloaded (503), rate limited (429), slow, or unknown (404),
+// the next one answers. Override with GEMINI_MODELS="a,b,c" (comma separated, primary first).
+const DEFAULT_CHAIN = [
+  'gemini-flash-lite-latest', // primary
+  'gemini-3-flash-preview', // secondary
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-flash-latest',
+  'gemini-2.5-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-pro',
+  'gemini-pro-latest',
+];
+function modelChain() {
+  const custom = (process.env.GEMINI_MODELS || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return [...new Set(custom.length ? custom : DEFAULT_CHAIN)];
+}
+// A model that just failed is skipped for a while so the next request does not wait on it again.
+const cooldown = new Map();
+const COOL_MS = { 503: 60000, 429: 90000, 500: 30000, 504: 30000, 404: 600000, 400: 300000 };
 
 export async function POST(request) {
   const user = await getUserFromRequest(request);
@@ -91,29 +111,45 @@ function extractJson(raw) {
 }
 
 async function generateNarrative(prompt) {
+  const chain = modelChain();
+  const t0 = Date.now();
+  const BUDGET = 55000; // stays inside maxDuration (60 s)
+  const ready = chain.filter((m) => (cooldown.get(m) || 0) <= Date.now());
+  const order = ready.length ? ready : chain;
   let lastErr = new Error('No attempt made.');
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let strict = false;
+  for (const model of order) {
+    const left = BUDGET - (Date.now() - t0);
+    if (left < 4000) break;
     try {
       const text = await callGemini(
-        attempt === 0
-          ? prompt
-          : prompt + '\n\nYour previous reply could not be parsed. Reply again with ONLY the JSON object.'
+        strict ? prompt + '\n\nYour previous reply could not be parsed. Reply again with ONLY the JSON object.' : prompt,
+        model,
+        Math.min(25000, left)
       );
       const obj = extractJson(text);
-      if (obj) return obj;
+      if (obj) {
+        if (model !== chain[0]) console.info(`Gemini: answered by fallback model ${model}`);
+        return obj;
+      }
       lastErr = new Error('Unparseable model output.');
+      strict = true;
     } catch (e) {
       lastErr = e;
+      console.warn(`Gemini: ${model} failed (${e.status || e.name}): ${String(e.message).slice(0, 120)}`);
+      if (e.status === 401 || e.status === 403) break; // a bad key cannot be fixed by another model
+      const ms = COOL_MS[e.status] || (e.name === 'TimeoutError' ? 30000 : 0);
+      if (ms) cooldown.set(model, Date.now() + ms);
     }
   }
   throw lastErr;
 }
 
-async function callGemini(prompt) {
+async function callGemini(prompt, model, timeoutMs = 25000) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('Server is not configured with an API key.');
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
@@ -125,12 +161,14 @@ async function callGemini(prompt) {
         responseMimeType: 'application/json',
       },
     }),
-    signal: AbortSignal.timeout(50000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
-    throw new Error(`Provider error ${r.status}: ${e?.error?.message || r.statusText}`);
+    const err = new Error(`Provider error ${r.status}: ${e?.error?.message || r.statusText}`);
+    err.status = r.status;
+    throw err;
   }
 
   const body = await r.json();

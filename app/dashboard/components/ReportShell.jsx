@@ -1,12 +1,14 @@
 'use client';
 
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { buildMask, computeInsights, filtersActive, maskToIdx, dimCandidates, dimTitle, GRANS } from '../../../lib/mis/engine';
+import { buildMask, computeInsights, filtersActive, maskToIdx, dimCandidates, dimTitle, formatKpiValue, GRANS } from '../../../lib/mis/engine';
 import { buildTakeaways } from '../../../lib/mis/facts';
-import { fmtInt, isoDate, GRAN_LABEL } from '../../../lib/mis/format';
-import { COLOR_THEMES } from '../../../lib/mis/chartSetup';
+import { fmtInt, isoDate, fmtSpan, GRAN_LABEL } from '../../../lib/mis/format';
 import { exportRowsCsv } from '../../../lib/mis/exporters';
-import { Empty, Lead } from './ui';
+import { useTheme } from '../../../lib/mis/useTheme';
+import { Delta, Empty, Lead } from './ui';
+import CountUp from './CountUp';
+import ThemePicker from './ThemePicker';
 import ExecutiveSummary from './ExecutiveSummary';
 import Trends from './Trends';
 import Pivot from './Pivot';
@@ -14,25 +16,35 @@ import Ranking from './Ranking';
 import Exceptions from './Exceptions';
 import DataTable from './DataTable';
 import DataQuality from './DataQuality';
+import { computeDeep } from '../../../lib/mis/deep';
+import Insights from './Insights';
+import Forecast from './Forecast';
+import Compare from './Compare';
+import Ideas from './Ideas';
 
 const SECTIONS = [
   ['summary', 'Executive Summary'],
+  ['insights', 'Insights'],
   ['trends', 'Trends'],
+  ['forecast', 'Forecast'],
+  ['compare', 'Compare'],
   ['pivot', 'Breakdown / Pivot'],
   ['ranking', 'Performance Ranking'],
   ['exceptions', 'Exceptions & Risks'],
+  ['ideas', 'Ideas & Scenarios'],
   ['table', 'Data Table'],
   ['quality', 'Data Quality'],
 ];
-const SECTION_TEXT_KEY = { summary: 'summary', trends: 'trends', pivot: 'breakdown', ranking: 'ranking', exceptions: 'exceptions', quality: 'quality' };
+const SECTION_TEXT_KEY = { summary: 'summary', insights: 'insights', trends: 'trends', forecast: 'forecast', compare: 'compare', pivot: 'breakdown', ranking: 'ranking', exceptions: 'exceptions', ideas: 'ideas', quality: 'quality' };
+const NEEDS_DEEP = ['insights', 'forecast', 'ideas'];
 const EMPTY_FILTERS = { from: '', to: '', cats: {}, dropDupes: false };
 
 const prettyName = (f) => f.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Data report';
 
 export default function ReportShell({ report, onReupload, onRetryNarrative, narrativeBusy }) {
-  const { ds, fileName, narrative, narrativeNote, generatedAt, baseView } = report;
+  const { ds, fileName, narrative, narrativeNote, generatedAt, baseView, facts } = report;
+  const [theme] = useTheme();
   const [tab, setTab] = useState('summary');
-  const [theme, setTheme] = useState('vivid');
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [view, setView] = useState(baseView);
   const [targets, setTargets] = useState({});
@@ -44,6 +56,12 @@ export default function ReportShell({ report, onReupload, onRetryNarrative, narr
   const pending = filters !== dFilters || view !== dView;
   const mask = useMemo(() => buildMask(ds, dFilters), [ds, dFilters]);
   const ins = useMemo(() => computeInsights(ds, mask, dView), [ds, mask, dView]);
+  const needDeep = printAll || NEEDS_DEEP.includes(tab);
+  const deep = useMemo(() => (needDeep ? computeDeep(ds, mask, dView, ins) : null), [needDeep, ds, mask, dView, ins]);
+  const factText = useMemo(() => {
+    const m = new Map((facts || []).map((f) => [f.id, f.text]));
+    return (id) => m.get(id);
+  }, [facts]);
 
   const filtered = filtersActive(filters);
   const sameView = view.metric === baseView.metric && view.dimKey === baseView.dimKey && view.gran === baseView.gran;
@@ -71,28 +89,39 @@ export default function ReportShell({ report, onReupload, onRetryNarrative, narr
   };
   const doPrint = () => {
     setPrintAll(true);
-    setTimeout(() => window.print(), 800); // let every section mount and charts size themselves
+    setTimeout(() => window.print(), 800);
   };
   const baseName = fileName.replace(/\.[^.]+$/, '');
   const exportView = () => exportRowsCsv(ds, maskToIdx(mask), ds.order, `${baseName}-filtered.csv`);
   const resetFilters = () => setFilters(EMPTY_FILTERS);
 
   const title = narrative?.title || prettyName(fileName);
-  const period = ins.period ? `${isoDate(ins.period.min)} → ${isoDate(ins.period.max)}` : 'No date column';
-  const filterSummary = [
-    filters.from && `From ${filters.from}`,
-    filters.to && `To ${filters.to}`,
-    ...Object.entries(filters.cats).filter(([, v]) => v).map(([k, v]) => `${k} = ${v}`),
-    filters.dropDupes && 'Duplicates excluded',
-  ].filter(Boolean).join(' · ') || 'None';
+  const period = ins.period ? fmtSpan(ins.period.min, ins.period.max, ' → ') + (ds.yearless ? ' (month numbers)' : '') : 'No date column';
+  const filterSummary =
+    [
+      filters.from && `From ${filters.from}`,
+      filters.to && `To ${filters.to}`,
+      ...Object.entries(filters.cats).filter(([, v]) => v).map(([k, v]) => `${k} = ${v}`),
+      filters.dropDupes && 'Duplicates excluded',
+    ]
+      .filter(Boolean)
+      .join(' · ') || 'None';
 
   const common = { ds, mask, ins, view: dView, theme, onDrill };
   const renderSection = (id) => {
     switch (id) {
       case 'summary':
         return <ExecutiveSummary {...common} targets={targets} setTargets={setTargets} takeaways={takeaways} commentary={commentary} hiddenNarrative={!!narrative && !commentary} />;
+      case 'insights':
+        return <Insights {...common} deep={deep} commentary={commentary} />;
       case 'trends':
         return <Trends {...common} />;
+      case 'forecast':
+        return <Forecast {...common} deep={deep} />;
+      case 'compare':
+        return <Compare {...common} />;
+      case 'ideas':
+        return <Ideas {...common} deep={deep} commentary={commentary} factText={factText} />;
       case 'pivot':
         return <Pivot {...common} />;
       case 'ranking':
@@ -108,30 +137,52 @@ export default function ReportShell({ report, onReupload, onRetryNarrative, narr
 
   const visible = printAll ? SECTIONS : SECTIONS.filter((s) => s[0] === tab);
   const noRows = ins.tot.count === 0;
+  const heroKpis = ins.kpis.slice(0, 3);
 
   return (
     <div className="mis">
-      <div className="mis-sticky">
-        <div className="mis-rhead">
-          <div>
+      <header className="mis-hero">
+        <div className="mis-hero-bg" aria-hidden="true"><span /><span /><span /></div>
+        <div className="mis-hero-in">
+          <div className="mis-hero-l">
+            <div className="mis-eyebrow">Management report</div>
             <h1 className="mis-rtitle">{title}</h1>
             <div className="mis-rmeta">
-              <span><b>Source</b> {fileName}</span>
-              <span><b>Rows</b> <i className="mis-num">{fmtInt(ins.tot.count)}{filtered ? ` of ${fmtInt(ds.n)}` : ''}</i></span>
-              <span><b>Period</b> {period}</span>
-              <span><b>Generated</b> {generatedAt.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span>
-              {pending && <span className="mis-updating">Updating…</span>}
+              <span className="mis-chipm"><b>Source</b> {fileName}</span>
+              <span className="mis-chipm"><b>Rows</b> <i className="mis-num">{fmtInt(ins.tot.count)}{filtered ? ` of ${fmtInt(ds.n)}` : ''}</i></span>
+              <span className="mis-chipm"><b>Period</b> {period}</span>
+              <span className="mis-chipm"><b>Generated</b> {generatedAt.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</span>
+              {pending && <span className="mis-chipm live">Updating…</span>}
             </div>
+            {commentary?.summary && <p className="mis-hero-sum">{commentary.summary}</p>}
           </div>
           <div className="mis-actions">
-            <button className="mis-btn" onClick={exportView}>Export CSV</button>
+            <button className="mis-btn solid" onClick={exportView}>Export CSV</button>
             <button className="mis-btn" onClick={doPrint}>Export PDF / Print</button>
-            <button className="mis-btn ghost" onClick={onReupload}>Re-upload</button>
+            <button className="mis-btn" onClick={onReupload}>Re-upload</button>
           </div>
         </div>
+        {heroKpis.length > 0 && (
+          <div className="mis-hero-stats">
+            {heroKpis.map((k) => (
+              <div key={k.id} className="mis-hs">
+                <div className="mis-hs-l">{k.label}</div>
+                <div className="mis-hs-v mis-num"><CountUp value={k.value} format={(v) => formatKpiValue(ds, k, v)} /></div>
+                <Delta v={k.pop} />
+              </div>
+            ))}
+          </div>
+        )}
+      </header>
 
+      <div className="mis-sticky">
+        <nav className="mis-pills" aria-label="Report sections">
+          {SECTIONS.map(([id, label]) => (
+            <button key={id} className={'mis-pill' + (tab === id ? ' active' : '')} onClick={() => setTab(id)}>{label}</button>
+          ))}
+        </nav>
         <div className="mis-filterbar">
-          {ds.primaryDate && (
+          {ds.primaryDate && !ds.yearless && (
             <>
               <label className="mis-f"><span>From</span>
                 <input type="date" min={isoDate(ds.minDate)} max={isoDate(ds.maxDate)} value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
@@ -171,14 +222,10 @@ export default function ReportShell({ report, onReupload, onRetryNarrative, narr
               </select>
             </label>
           )}
-          <label className="mis-f"><span>Theme</span>
-            <select value={theme} onChange={(e) => setTheme(e.target.value)}>
-              {Object.entries(COLOR_THEMES).map(([k, t]) => <option key={k} value={k}>{t.label}</option>)}
-            </select>
-          </label>
+          <div className="mis-f"><span>Theme</span><ThemePicker /></div>
         </div>
-        <div className="mis-printonly">Filters: {filterSummary}</div>
       </div>
+      <div className="mis-printonly">Filters: {filterSummary}</div>
 
       {narrativeNote && (
         <div className="mis-banner">
@@ -191,28 +238,21 @@ export default function ReportShell({ report, onReupload, onRetryNarrative, narr
         </div>
       )}
 
-      <div className="mis-wrap">
-        <nav className="mis-nav" aria-label="Report sections">
-          {SECTIONS.map(([id, label]) => (
-            <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>
-          ))}
-        </nav>
-        <main className={'mis-main' + (pending ? ' pending' : '')}>
-          {visible.map(([id, label]) => (
-            <section key={id} className="mis-section" id={'sec-' + id}>
-              <h2 className="mis-h2">{label}</h2>
-              <Lead text={commentary?.sections?.[SECTION_TEXT_KEY[id]]} />
-              {noRows && id !== 'quality' && id !== 'table' ? (
-                <Empty title="No records match the current filters">
-                  <button className="mis-btn" onClick={resetFilters}>Reset filters</button>
-                </Empty>
-              ) : (
-                renderSection(id)
-              )}
-            </section>
-          ))}
-        </main>
-      </div>
+      <main className={'mis-main' + (pending ? ' pending' : '')}>
+        {visible.map(([id, label]) => (
+          <section key={id} className="mis-section" id={'sec-' + id}>
+            <h2 className="mis-h2">{label}</h2>
+            <Lead text={commentary?.sections?.[SECTION_TEXT_KEY[id]]} />
+            {noRows && id !== 'quality' && id !== 'table' ? (
+              <Empty title="No records match the current filters">
+                <button className="mis-btn" onClick={resetFilters}>Reset filters</button>
+              </Empty>
+            ) : (
+              renderSection(id)
+            )}
+          </section>
+        ))}
+      </main>
     </div>
   );
 }
